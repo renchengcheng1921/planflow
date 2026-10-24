@@ -25,18 +25,22 @@ PlanFlow 是「个人 TODO + 团队项目管理 + 计划可视化大屏」一体
 
 ## 2. 快速开始
 
-前置：Go ≥ 1.22、Node ≥ 20、pnpm、Docker（本地 PG/Redis/RustFS）。
+前置：Go ≥ 1.22、Node ≥ 20、pnpm、make；S0 锁定实际使用的稳定版本。当前日常开发复用已部署的 PostgreSQL/Redis，不强制本机重复部署。Docker 用于可选本地依赖与 testcontainers；无 Docker 时，MVP 集成测试可使用显式配置且已验证隔离的真实测试 PG/Redis，不能使用开发库替代。P1 RustFS 集成测试仍按第 11.7 节执行。
+
+**当前不采用 CI/CD**：检查由开发者在本机手动运行，保留验收记录，不取消 lint、测试、构建或发布前验证。具体阶段和依赖见 [开发步骤](docs/plans/2026-10-24-planflow-development.md)，环境与迁移约定见 [ADR 0001](docs/decisions/0001-development-baseline.md)。
 
 ```bash
 make bootstrap                # 安装 go 工具链依赖 + pnpm install
-cp .env.example .env          # 按需修改 DB_* / REDIS_* / STORAGE_* / CREDENTIAL_KEK
-make up                       # docker compose 起 postgres / redis / rustfs / mailhog
-make migrate                  # 执行 schema 同步（AutoMigrate + 手写迁移）+ 幂等 ensure bucket
+cp .env.example .env          # 配置 PLANFLOW_DB_* / PLANFLOW_REDIS_*，由启动脚本加载到环境
+make up                       # 可选：本机依赖；已有 PG/Redis 时跳过
+make migrate                  # 前置 SQL → AutoMigrate → 后置 SQL；P1 再增加 ensure bucket
 make seed                     # 演示工作区与示例项目
 make dev                      # 并行启动 api / worker / web
 ```
 
-`make up` 会拉起 RustFS 容器（S3 API 默认 `http://localhost:9000`，控制台端口以官方镜像文档为准）。本地访问密钥通过 `.env` 注入容器与后端，**不要在代码或 compose 文件中硬编码默认密钥**。bucket 由 `make migrate` 幂等创建（HeadBucket → CreateBucket），不要求手动在控制台建桶。
+以上命令是 S0 要交付的接口，尚未实现前不能视为可运行。Windows PowerShell 中逐条执行；`.env` 不自动进入 Viper，需由脚本显式加载。真实连接信息仅放本地环境或忽略提交的 `.env`，开发和测试使用隔离资源。
+
+MVP 不启动 RustFS、不要求 Storage/KEK 配置，也不创建相关占位包。P1 文件阶段才增加 RustFS（S3 API 默认 `http://localhost:9000`，控制台端口以官方镜像文档为准）与 `PLANFLOW_STORAGE_*`；凭据阶段才增加 `PLANFLOW_CREDENTIAL_KEK`。访问密钥只通过环境注入，**不要在代码或 compose 文件中硬编码默认密钥**。bucket 在 P1 由 `make migrate` 幂等创建（HeadBucket → CreateBucket），不要求手动在控制台建桶。
 
 ### 常用命令
 
@@ -47,9 +51,9 @@ make dev                      # 并行启动 api / worker / web
 | `make lint` | `golangci-lint run` + 前端 ESLint/Prettier |
 | `make fmt` | `gofmt -w` / `goimports` + 前端格式化 |
 | `make test` | `go test ./...` + 前端 Vitest |
-| `make test:integration` | Go 集成测试（testcontainers 起 PG/Redis/RustFS） |
+| `make test:integration` | Go 集成测试（优先 testcontainers；MVP 可接隔离测试 PG/Redis，P1 再加 RustFS） |
 | `make test:e2e` | Playwright |
-| `make migrate` | 执行 `cmd/migrate`（AutoMigrate + `migrations/*.sql` + ensure bucket） |
+| `make migrate` | 执行 `cmd/migrate`（前置 SQL → AutoMigrate → 后置 SQL；P1 再 ensure bucket） |
 | `make seed` | 写入种子数据 |
 | `make reset-db` | 重置本地数据库（**禁止在生产环境运行**） |
 
@@ -98,7 +102,7 @@ services/
   api/
     cmd/api/main.go          # HTTP 入口（配置加载、依赖装配、优雅退出）
     cmd/worker/main.go       # 异步任务入口（复用 internal）
-    cmd/migrate/main.go      # 迁移入口：AutoMigrate + migrations/*.sql + ensure bucket
+    cmd/migrate/main.go      # 前置 SQL → AutoMigrate → 后置 SQL；P1 再 ensure bucket
     internal/
       domain/                # 实体、值对象、不变式、领域错误（纯 Go，无 gin/gorm/s3 依赖）
       app/                   # 用例层：事务编排、权限、Activity 写入
@@ -129,7 +133,7 @@ transport/http  →  app  →  domain
 
 - `domain` **不得** import `gin`、`gorm`、AWS SDK 或任何 `internal/repo|storage|secrets`。
 - `app` 不直接接触 `gin.Context`，只接收 `context.Context` + 领域入参；**不直接持有 `*gorm.DB` 或 `*s3.Client`**，通过仓储/存储接口访问。
-- `repo` 是唯一允许出现 GORM API 的层；`storage` 是唯一允许调用 S3 SDK 的层；`secrets` 是唯一允许加解密凭据的层。
+- `repo` 是唯一允许出现 GORM API 的层；`platform/db` 负责连接配置与装配，调用 repo 提供的工厂，不承载业务查询。`storage` 是唯一允许调用 S3 SDK 的层；`secrets` 是唯一允许加解密凭据的层。
 - GORM 模型、S3 SDK 类型不得泄漏到 handler 的响应 DTO。
 - handler 不写业务逻辑：只做「绑定 → 校验 → 调 app → 映射响应/错误」。
 
@@ -170,11 +174,11 @@ transport/http  →  app  →  domain
 
 ### GORM 使用约定
 
-- **连接**：`platform/db` 统一构造 `*gorm.DB`，配置 `NamingStrategy{SingularTable: false}`、`NowFunc` 返回 UTC、`Logger` 适配到 Zap（按 `DB_LOG_LEVEL` 控制，生产默认只记慢查询与错误，**参数值不落日志**）。
+- **连接**：`platform/db` 统一装配连接配置，调用 repo 内工厂构造 GORM 连接，配置 `NamingStrategy{SingularTable: false}`、`NowFunc` 返回 UTC、`Logger` 适配到 Zap（按 `PLANFLOW_DB_LOG_LEVEL` 控制，生产默认只记慢查询与错误，**参数值不落日志**）。GORM 句柄不进入 app/domain/handler。
 - **模型位置**：GORM 模型集中定义在 `internal/repo/models/`，通过显式映射函数转换为 `domain` 实体。**禁止把带 `gorm` tag 的结构体直接当 API 响应**。
 - **表名**：显式实现 `TableName()`，不依赖复数推导。
 - **索引**：必须在结构体 tag 中显式声明（`index`、`uniqueIndex`），否则 AutoMigrate 不会创建。关键索引：`tasks(project_id, status)`、`tasks(assignee_id, due_at)`、`today_plans(workspace_id, plan_date)`、`notifications(user_id, read_at)`、`activities(resource_type, resource_id, created_at)`、`notification_dedup_key` 唯一索引。
-- **事务**：写操作使用 `db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { ... })`，Activity 写入与业务写入必须在同一事务。**禁止在事务内调用会自行开事务的仓储方法**（仓储需接受 `tx *gorm.DB` 参数以便组合）。
+- **事务**：app 定义不含 GORM 类型的事务/Unit of Work 接口，repo 内部使用 `db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { ... })` 实现，向回调提供绑定同一事务的业务与 Activity 仓储。Activity 写入与业务写入必须在同一事务；仓储之间需要传递 `tx *gorm.DB` 时仅限 repo 内部。**禁止在事务内调用会自行开事务的仓储方法；禁止把 GORM 句柄传入 app**。事务与 Activity 从 S1 首次业务写入开始建设。
 - **查询安全**：**禁止**用 `db.Raw` / `Where(fmt.Sprintf(...))` 拼接用户输入；动态排序/筛选字段必须走白名单映射。
 - **Preload**：关联加载必须显式 `Preload`；列表接口禁止无脑全量 Preload 导致 N+1 放大。
 - **条件复用**：可复用的查询条件用 `Session(&gorm.Session{})` 防止条件污染；`*gorm.DB` 不可跨 goroutine 共享。
@@ -185,13 +189,13 @@ transport/http  →  app  →  domain
 
 ### 迁移（AutoMigrate 为主）
 
-- **正式同步入口**：`make migrate` → `cmd/migrate`，顺序为：① 执行 `migrations/*.sql`（按文件名排序）→ ② 对全部模型执行 `AutoMigrate` → ③ 幂等 ensure bucket。
+- **正式同步入口**：`make migrate` → `cmd/migrate`，顺序为：① 获取迁移锁 → ② 执行前置 SQL（`services/migrations/pre/*.sql`，按文件名排序）→ ③ 对全部模型执行 `AutoMigrate` → ④ 执行后置 SQL（`services/migrations/post/*.sql`，按文件名排序）→ ⑤ P1 文件阶段幂等 ensure bucket → ⑥ 释放迁移锁。调整旧表的 SQL 在前置执行；依赖本次新增表/列的约束与回填在后置执行，不能在建表前引用新表。当前尚无旧迁移文件；如后续存在旧根目录 SQL，迁移器须明确定义其前置执行与版本兼容策略。
 - **生产**：`cmd/migrate` 作为独立部署步骤（Job / 一次性容器）执行，**不在应用进程内执行**；执行前需 review `AutoMigrate` 的 schema diff。
-- **AutoMigrate 的能力边界（必须牢记）**：它能新增表/列/索引，但**不会**删除列、不会重命名列、不会改列类型、不会删索引、不做数据回填。以下变更**必须**额外写 `migrations/NNNN_xxx.sql`：
+- **AutoMigrate 的能力边界（必须牢记）**：它能新增表/列/索引及部分约束，也可能按 GORM/驱动版本和字段差异修改列类型或可空性，**不能假定它只做新增**。它不负责安全推断重命名、删除和业务回填；必须审查实际 schema diff。以下变更**必须**额外写前置或后置的版本化 SQL（`services/migrations/{pre,post}/NNNN_xxx.sql`），不依赖隐式自动转换：
   - 删除/重命名列或表、改列类型、加约束（CHECK/FK）
   - 大表加索引（需 `CREATE INDEX CONCURRENTLY`）或加非空列（需分段：加可空列 → 回填 → 加 NOT NULL）
   - 任何需要数据回填的变更（**含凭据字段上线后的密钥轮换回填**）
-- 手写 SQL 必须幂等（`IF NOT EXISTS` / `IF EXISTS`）或带版本记录表 `schema_migrations`（由 `cmd/migrate` 维护）。
+- 手写 SQL 必须幂等（`IF NOT EXISTS` / `IF EXISTS`）或带版本记录表 `schema_migrations`（由 `cmd/migrate` 维护）；记录版本与校验和，失败不标成功，禁止修改已成功执行的文件。前置/后置 SQL 分别排序、记录阶段；非事务 SQL（如并发建索引）须显式声明并有失败恢复策略。验收同时覆盖全新库初始化、旧版本升级、重复执行与失败重跑，禁止空迁移占位。
 - **不可回滚的迁移**必须在文件头写 `-- irreversible: 原因` 并在 PR 中说明。
 - 数据库统一使用 `timestamptz`；Go 侧字段用 `time.Time`，写入前 `.UTC()`。
 
