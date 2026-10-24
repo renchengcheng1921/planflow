@@ -2,6 +2,8 @@
 
 本文件是给在本仓库中工作的 AI Agent（以及人类开发者）的操作手册。**开始任何编码前请完整阅读**。若本文件与实际代码冲突，以代码为准，并在 PR 中同步修正本文件。
 
+**后续开发同时遵循 [统一开发规范](docs/standards/development.md)**：本文定义产品与安全硬约束，统一规范定义命名、目录、API、前端和交付细则。较完整功能使用 [功能规格模板](docs/templates/feature-spec.md)，实际验证使用 [验收记录模板](docs/templates/verification.md)；简单变更允许简写。规范变更须同步相关文档，不另建互相矛盾的约定。
+
 ---
 
 ## 1. 项目简介
@@ -203,11 +205,12 @@ transport/http  →  app  →  domain
 
 ## 7. API 约定（Gin）
 
+- 业务 API 统一前缀 `/api/v1`，工作区资源默认位于 `/api/v1/workspaces/{workspace_id}/...`；`/healthz`、`/readyz` 独立。JSON 字段 snake_case，单资源直接返回 DTO，集合为 `items + pagination`；OpenAPI 3.0.3 契约在 S0 建立并随当期功能维护，具体遵循统一开发规范第 4 节。本文件其余简写路由均省略版本/作用域前缀，不代表另一套接口。
 - 所有外部输入在 handler 绑定后校验；校验逻辑复杂时下沉到 `domain`，用 `fmt.Errorf("%w: ...", ErrValidation)` 包装。
 - 统一错误响应：`{ "code": "...", "message": "...", "details": {} }`，`code` 为稳定枚举（`TODAY_FULL`、`DEPENDENCY_CYCLE`、`FORBIDDEN`、`VALIDATION_FAILED`、`NOT_FOUND`、`CONFLICT`、`REAUTH_REQUIRED`、`STORAGE_UNAVAILABLE`）。
 - **错误映射集中在一处**：`transport/http/errors.go` 用 `errors.Is/As` 把领域错误映射为状态码，handler 只 `c.Error(err)`，**禁止每个 handler 自造状态码**。
 - 中间件顺序固定：`request_id → recover → zap access log → auth → authorize → handler`。
-- 列表接口必须分页（`limit` 默认 20、上限 100；游标或 `offset` 二选一，同一资源保持一致）。
+- 列表接口必须分页：MVP 统一 `offset`（默认 0，非负），`limit` 默认 20、范围 1–100，非法值返回校验错误；响应 `pagination` 含 `limit/offset/has_more`，排序稳定并有 ID 同值次序。改用 cursor 须记录契约变更，不能同一资源混用。
 - 大屏相关路由挂在只读 token 中间件下，不得注册任何写方法。
 - 请求上下文与 DB 上下文一律用 `c.Request.Context()`；禁止用 `context.Background()` 逃逸请求生命周期（异步任务入口除外）。
 - 响应 DTO 与 GORM 模型、领域实体、S3 SDK 类型分离，不直接序列化。
@@ -239,6 +242,7 @@ transport/http  →  app  →  domain
 
 ## 9. 前端约定
 
+- 目录、TypeScript strict、共享组件、语义 token、统一 API 客户端、Query key/失效和可访问性遵循统一开发规范第 7 节；首个真实页面确认视觉 token，禁止各页面独立复制基础组件和状态处理。
 - 默认 Server Component；只有需要交互/浏览器 API 时才加 `'use client'`，并尽量下沉到叶子组件。
 - 页面结构遵守产品定义：「我的今天」= 今日必做 / 时间块 / 收件箱待整理三块。
 - 快速收集：全局快捷键（默认 `Ctrl/Cmd + K`）与悬浮按钮必须存在，收集默认进收件箱。
@@ -422,7 +426,7 @@ transport/http  →  app  →  domain
 
 ## 16. Agent 工作流程
 
-1. 读 `docs/product/planflow.md`、本文件、`docs/decisions/` 下相关 ADR。
+1. 读 `docs/product/planflow.md`、本文件、`docs/standards/development.md`、`docs/decisions/` 下相关 ADR；产品原文尚未入库时按开发步骤记录其缺失，不冒充已阅读。较完整功能先填写功能规格，验收时记录真实结果。
 2. 明确任务属于哪个阶段（MVP/P1/P2）；超出范围先提出，不要自行扩张。
 3. 涉及模型变化：先在 `internal/repo/models/` 改模型（含索引 tag）→ 判断 AutoMigrate 是否足够，不足则写幂等 `migrations/NNNN_*.sql` → 更新 `cmd/migrate` 执行顺序 → 再改 `domain` → `app` → `repo` → `transport/http`，最后接前端。
 4. 涉及业务规则：先在 `internal/domain` 写实现 + 测试，再在 `app` 编排（事务内写 Activity），最后接入 handler/UI。
